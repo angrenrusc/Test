@@ -3,6 +3,16 @@ import struct
 from asn1crypto import x509
 from socket import inet_ntoa
 from re import match
+from pathlib import Path
+from requests import get
+from time import time
+
+def get_ip_file():
+    url = "https://www.dan.me.uk/torlist/"
+    #url = "https://check.torproject.org/torbulkexitlist"
+    #url = "https://raw.githubusercontent.com/gregcusack/tor_classifier/master/tor_ips.txt"
+    response = get(url)
+    open('tor_ips.txt', 'wb').write(response.content)
 
 def tls_multi_factory_new(buf):
     i, n = 0, len(buf)
@@ -83,12 +93,18 @@ def tor_check_2 (certInfo, port):
     flag = flag & (400 < certInfo['size'] < 600)
     return flag
 
-def tor_check_3(port):
-
-    pass
+def tor_check_3(ips):
+    with open("tor_ips.txt", "r") as f:
+        for ip_tor in f:
+            for (ip_pcap, port) in ips:
+                if ip_tor[:-1] == ip_pcap:
+                    if port in {22, 80, 443, 8080, 8443, 9000, 9001, 9010, 20000, 20002}:
+                        print('uhu')
+    return 1
 
 def packet_analyse(cap):
     i = 0
+    ips_set = set()
     for timestamp, packet in cap:
         eth = dpkt.ethernet.Ethernet(packet)
         if not(isinstance(eth.data, dpkt.ip.IP)):
@@ -97,6 +113,7 @@ def packet_analyse(cap):
         if not(isinstance(ip.data, dpkt.tcp.TCP)):
             continue
         tcp = ip.data
+        ips_set.add((inet_ntoa(ip.dst), tcp.dport))
         records = []
         try:
             records, bytes_used = tls_multi_factory_new(tcp.data)
@@ -117,9 +134,20 @@ def packet_analyse(cap):
                 print(certInfo)
                 print(tor_check_1(certInfo))
                 print(tor_check_2(certInfo, tcp.sport))
+    print(tor_check_3(ips_set))
 
 def main():
-    with open('with_many_certs.pcap', 'rb') as fp:
+    fips = Path('tor_ips.txt')
+    if not(fips.exists()):
+        get_ip_file()
+    half_hour = 1800
+    file_time = fips.stat().st_mtime
+    time_now = time()
+    if (time_now - file_time > half_hour):
+        print('Updating ip_s file')
+        get_ip_file()
+
+    with open('stolen2.pcap', 'rb') as fp:
         capture = dpkt.pcap.Reader(fp)
         packet_analyse(capture)
 
