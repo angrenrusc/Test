@@ -7,17 +7,10 @@ from pathlib import Path
 from requests import get
 from time import time
 
-def get_ip_file():
-    url = "https://www.dan.me.uk/torlist/"
-    #url = "https://check.torproject.org/torbulkexitlist"
-    #url = "https://raw.githubusercontent.com/gregcusack/tor_classifier/master/tor_ips.txt"
-    response = get(url)
-    open('tor_ips.txt', 'wb').write(response.content)
 
-def tls_multi_factory_new(buf):
+def tls_multifactory(buf):
     i, n = 0, len(buf)
     msgs = []
-
     while i + 5 <= n:
         v = buf[i + 1:i + 3]
         if v in dpkt.ssl.SSL3_VERSION_BYTES:
@@ -67,56 +60,57 @@ def cert_parse(certificates):
 
     return certInfo
 
-
 def tor_check_1 (certInfo):
-    flag = 1
+    flags = {}
     # self-signed check
-    flag = flag & certInfo['self_signed']
+    flags['self_signed'] = certInfo['self_signed']
     # order check
-    flag = flag & (certInfo['order_1'] | certInfo['order_2'])
+    flags['order'] = (certInfo['order_1'] | certInfo['order_2'])
     # issuer check
-    flag = flag & (match(r'www\.[a-zA-Z0-9]{8,20}\.com', certInfo['issuer']) is not None)
-    # subject check
-    flag = flag & (match(r'www\.[a-zA-Z0-9]{8,20}\.net', certInfo['subject']) is not None)
-    # not the same check
-    flag = flag & (not(certInfo['issuer'][:-4] == certInfo['subject'][:-4]))
-    return flag
+    flags['issuer'] = (match(r'www\.[a-zA-Z0-9]{8,20}\.com', certInfo['issuer']) is not None)
+    # subject check and not the same check
+    flags['subject'] = (match(r'www\.[a-zA-Z0-9]{8,20}\.net', certInfo['subject']) is not None) and (not(certInfo['issuer'][:-4] == certInfo['subject'][:-4]))
+    flags['result'] = (int(flags['self_signed']) + int(flags['order']) + int(flags['issuer']) + int(flags['subject'])) * 100 / 4.0
+    return flags
 
-
-def tor_check_2 (certInfo, port):
-    flag = 1
+def tor_check_2(certInfo, port):
+    flags = {}
     # port check
-    flag = flag & (port in {22, 80, 443, 8080, 8443, 9000, 9001, 20000, 20001, 20002})
+    flags['port'] = (port in {22, 80, 443, 8001, 8080, 8443, 9000, 9001, 9010, 9901, 20000, 20001, 20002})
     # subject check
-    flag = flag & (match(r'www\.[a-zA-Z0-9]{8,20}\.net', certInfo['subject']) is not None)
+    flags['subject'] = (match(r'www\.[a-zA-Z0-9]{8,20}\.net', certInfo['subject']) is not None)
     # size check
-    flag = flag & (400 < certInfo['size'] < 600)
-    return flag
+    flags['size'] = (400 < certInfo['size'] < 600)
+    flags['result'] = (int(flags['port']) + int(flags['subject']) + int(flags['size'])) * 100 / 3.0
+    return flags
 
 def tor_check_3(ips):
+    print('IP check running')
     with open("tor_ips.txt", "r") as f:
         for ip_tor in f:
-            for (ip_pcap, port) in ips:
+            for (ip_pcap, port, ip_src) in ips:
                 if ip_tor[:-1] == ip_pcap:
                     if port in {22, 80, 443, 8080, 8443, 9000, 9001, 9010, 20000, 20002}:
-                        print('uhu')
-    return 1
+                        print("User " + ip_src + ' connected to TOR ip ' + ip_pcap)
 
 def packet_analyse(cap):
     i = 0
     ips_set = set()
     for timestamp, packet in cap:
-        eth = dpkt.ethernet.Ethernet(packet)
+        try:
+            eth = dpkt.ethernet.Ethernet(packet)
+        except:
+            pass
         if not(isinstance(eth.data, dpkt.ip.IP)):
             continue
         ip = eth.data
         if not(isinstance(ip.data, dpkt.tcp.TCP)):
             continue
         tcp = ip.data
-        ips_set.add((inet_ntoa(ip.dst), tcp.dport))
+        ips_set.add((inet_ntoa(ip.dst), tcp.dport, inet_ntoa(ip.src)))
         records = []
         try:
-            records, bytes_used = tls_multi_factory_new(tcp.data)
+            records, bytes_used = tls_multifactory(tcp.data)
         except:
             continue
         for record in records:
@@ -128,18 +122,26 @@ def packet_analyse(cap):
                 hd = handshake.data
             except Exception as e:
                 continue
-            if hdtype == 11:
+            if hdtype == 11: # certificate
                 certInfo = cert_parse(hd.certificates)
-                print(tcp.sport, tcp.dport, inet_ntoa(ip.dst), inet_ntoa(ip.src)) #source and destination ports
+                print(inet_ntoa(ip.dst), tcp.dport, inet_ntoa(ip.src), tcp.sport) # ips and ports
                 print(certInfo)
-                print(tor_check_1(certInfo))
-                print(tor_check_2(certInfo, tcp.sport))
-    print(tor_check_3(ips_set))
+                print('First check result: ' + str(tor_check_1(certInfo)))
+                print('Second check result: ' + str(tor_check_2(certInfo, tcp.sport)))
+                print()
+    tor_check_3(ips_set)
 
-def main():
+def get_ip_file():
+    url = "https://www.dan.me.uk/torlist/"
+    #url = "https://raw.githubusercontent.com/gregcusack/tor_classifier/master/tor_ips.txt"
+    response = get(url)
+    open('tor_ips.txt', 'wb').write(response.content)
+
+def file_update():
     fips = Path('tor_ips.txt')
     if not(fips.exists()):
         get_ip_file()
+    # check if more than 30 min passed from last file update
     half_hour = 1800
     file_time = fips.stat().st_mtime
     time_now = time()
@@ -147,7 +149,9 @@ def main():
         print('Updating ip_s file')
         get_ip_file()
 
-    with open('stolen2.pcap', 'rb') as fp:
+def main():
+    file_update()
+    with open('with_cert.pcap', 'rb') as fp:
         capture = dpkt.pcap.Reader(fp)
         packet_analyse(capture)
 
